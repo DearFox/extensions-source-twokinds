@@ -16,20 +16,21 @@ import kotlin.math.min
 
 class TwoKinds : HttpSource() {
 
-    override val name = "Keenspot TwoKinds"
+    override val name = "TwoKinds ru"
 
-    override val baseUrl = "https://twokinds.keenspot.com"
+    override val baseUrl = "https://twokinds.ru"
 
-    override val lang = "en"
+    override val lang = "ru"
 
     override val supportsLatest: Boolean = false
 
-    override val id: Long = 3133607736276627986
+    override val id: Long = 3133707736276627986
 
     // the one and only manga entry
     fun mangaSinglePages(): SManga = SManga.create().apply {
-        title = "TwoKinds (1 page per chapter)"
-        thumbnail_url = "https://dummyimage.com/768x994/000/ffffff.jpg&text=$title"
+        title = "TwoKinds ru (1 страница в главе)"
+        thumbnail_url = "https://twokinds.ru/comic/6/page"
+        // thumbnail_url = "https://dummyimage.com/768x994/000/ffffff.jpg&text=$title"
         artist = "Tom Fischbach"
         author = "Tom Fischbach"
         status = SManga.UNKNOWN
@@ -37,8 +38,9 @@ class TwoKinds : HttpSource() {
     }
 
     fun manga20Pages(): SManga = SManga.create().apply {
-        title = "TwoKinds (20 pages per chapter)"
-        thumbnail_url = "https://dummyimage.com/768x994/000/ffffff.jpg&text=$title"
+        title = "TwoKinds ru (20 страниц в главе)"
+        thumbnail_url = "https://twokinds.ru/comic/6/page"
+        // thumbnail_url = "https://dummyimage.com/768x994/000/ffffff.jpg&text=$title"
         artist = "Tom Fischbach"
         author = "Tom Fischbach"
         status = SManga.UNKNOWN
@@ -85,7 +87,7 @@ class TwoKinds : HttpSource() {
     private fun chapterListParse(response: Response, manga: SManga): List<SChapter> {
         val document = response.asJsoup()
 
-        val pages = document.select(".chapter-links")
+        val pages = document.select(".ChapterLinks")
             .flatMap { season -> season.select("> a") }
             .map { a ->
                 // /comic/1185halloween/ -> 1185halloween
@@ -129,7 +131,7 @@ class TwoKinds : HttpSource() {
             val firstPage = chapter.url.substringAfter("-")
             val document = client.newCall(chapterListRequest(SManga.create())).execute().asJsoup()
 
-            val pages = document.select(".chapter-links")
+            val pages = document.select(".ChapterLinks")
                 .flatMap { season -> season.select("> a") }
                 .map { a ->
                     // /comic/1185halloween/ -> 1185halloween
@@ -154,10 +156,19 @@ class TwoKinds : HttpSource() {
 
     override fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException()
 
+//    override fun imageUrlParse(response: Response): String {
+//        val document = response.asJsoup()
+//
+//        return document.select("#comic header img").first()!!.attr("src")
+//    }
     override fun imageUrlParse(response: Response): String {
         val document = response.asJsoup()
-
-        return document.select("#content article img").first()!!.attr("src")
+        val src = document.select("#comic header img").first()!!.attr("src")
+        return if (src.startsWith("http://") || src.startsWith("https://")) {
+            src
+        } else {
+            "$baseUrl$src"
+        }
     }
 
     override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> = throw Exception("Search functionality is not available.")
