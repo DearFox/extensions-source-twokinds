@@ -12,168 +12,137 @@ import eu.kanade.tachiyomi.util.asJsoup
 import okhttp3.Request
 import okhttp3.Response
 import rx.Observable
-import kotlin.math.min
 
 class TwoKinds : HttpSource() {
 
     override val name = "TwoKinds ru"
-
     override val baseUrl = "https://twokinds.ru"
-
     override val lang = "ru"
-
-    override val supportsLatest: Boolean = false
-
+    override val supportsLatest = false
     override val id: Long = 3133707736276627986
 
-    // the one and only manga entry
-    fun mangaSinglePages(): SManga = SManga.create().apply {
-        title = "TwoKinds ru (1 страница в главе)"
-        thumbnail_url = "https://twokinds.ru/comic/6/page"
-        // thumbnail_url = "https://dummyimage.com/768x994/000/ffffff.jpg&text=$title"
-        artist = "Tom Fischbach"
-        author = "Tom Fischbach"
-        status = SManga.UNKNOWN
-        url = "1"
-    }
+    // Кэш данных глав (список страниц по главам)
+    private var chaptersCache: List<ChapterData>? = null
 
-    fun manga20Pages(): SManga = SManga.create().apply {
-        title = "TwoKinds ru (20 страниц в главе)"
-        thumbnail_url = "https://twokinds.ru/comic/6/page"
-        // thumbnail_url = "https://dummyimage.com/768x994/000/ffffff.jpg&text=$title"
-        artist = "Tom Fischbach"
-        author = "Tom Fischbach"
-        status = SManga.UNKNOWN
-        url = "20"
-    }
+    // Структура для хранения информации о главе
+    data class ChapterData(
+        // data-ch-id
+        val id: String,
+        // текст из h2
+        val name: String,
+        // список страниц в главе
+        val pages: List<PageRef>,
+    )
 
-    override fun fetchPopularManga(page: Int): Observable<MangasPage> = Observable.just(MangasPage(listOf(mangaSinglePages(), manga20Pages()), false))
+    data class PageRef(
+        // идентификатор страницы, например "6"
+        val urlPart: String,
+        // номер страницы из span
+        val pageName: String,
+    )
+
+    // ------------------------------------------------------------
+    // Manga (единственный комикс)
+    // ------------------------------------------------------------
+    override fun fetchPopularManga(page: Int): Observable<MangasPage> = Observable.just(MangasPage(listOf(mangaDetails), false))
 
     override fun popularMangaRequest(page: Int): Request = throw UnsupportedOperationException()
-
     override fun popularMangaParse(response: Response): MangasPage = throw UnsupportedOperationException()
 
-    // latest Updates not used
-
+    override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
     override fun latestUpdatesParse(response: Response): MangasPage = throw UnsupportedOperationException()
 
-    override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
-
-    // the manga is one and only, but still write the data again to avoid bugs in backup restore
-    override fun fetchMangaDetails(manga: SManga): Observable<SManga> {
-        if (manga.url == "1") {
-            return Observable.just(mangaSinglePages())
-        } else {
-            return Observable.just(manga20Pages())
-        }
-    }
+    override fun fetchMangaDetails(manga: SManga): Observable<SManga> = Observable.just(mangaDetails)
 
     override fun mangaDetailsParse(response: Response): SManga = throw UnsupportedOperationException()
 
-    // chapter list
+    private val mangaDetails: SManga
+        get() = SManga.create().apply {
+            title = "TwoKinds ru"
+            thumbnail_url = "https://twokinds.ru/comic/6/page"
+            artist = "Tom Fischbach"
+            author = "Tom Fischbach"
+            status = SManga.UNKNOWN
+            // не используется
+            url = "0"
+        }
 
+    // ------------------------------------------------------------
+    // Chapters
+    // ------------------------------------------------------------
     override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = client.newCall(chapterListRequest(manga))
         .asObservableSuccess()
-        .map { response ->
-            chapterListParse(response, manga)
-        }
+        .map { response -> chapterListParse(response, manga) }
 
     override fun chapterListRequest(manga: SManga): Request = GET("$baseUrl/archive/", headers)
 
     override fun chapterListParse(response: Response): List<SChapter> = throw UnsupportedOperationException()
 
-    data class TwoKindsPage(val url: String, val name: String)
-
     private fun chapterListParse(response: Response, manga: SManga): List<SChapter> {
-        val document = response.asJsoup()
-
-        val pages = document.select(".ChapterLinks")
-            .flatMap { season -> season.select("> a") }
-            .map { a ->
-                // /comic/1185halloween/ -> 1185halloween
-                val urlPart = a.attr("href").split("/")[2]
-                val name = a.selectFirst("span")!!.text()
-
-                TwoKindsPage(urlPart, name)
+        val chapters = fetchChaptersData(response)
+        return chapters.map { chapter ->
+            SChapter.create().apply {
+                url = chapter.id
+                name = chapter.name
             }
-
-        // 1 page per chapter
-        if (manga.url == "1") {
-            return pages.map { page ->
-                SChapter.create().apply {
-                    url = "1-${page.url}"
-                    name = "Page ${page.name}"
-                }
-            }.reversed()
-        }
-
-        // 20 pages per chapter
-        val chapters = mutableListOf<SChapter>()
-        for (i in pages.indices step 20) {
-            chapters.add(
-                SChapter.create().apply {
-                    url = "20-${pages[i].url}"
-                    name = "Pages ${pages[i].name}-${pages[min(pages.size, i + 20) - 1].name}"
-                },
-            )
-        }
-        return chapters.reversed()
+        }.reversed() // последние главы сверху
     }
 
+    // ------------------------------------------------------------
+    // Pages
+    // ------------------------------------------------------------
     override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
-        if (chapter.url.startsWith("1")) {
-            return Observable.just(
-                listOf(
-                    Page(0, baseUrl + "/comic/${chapter.url.substringAfter("-")}/"),
-                ),
-            )
-        } else {
-            val firstPage = chapter.url.substringAfter("-")
-            val document = client.newCall(chapterListRequest(SManga.create())).execute().asJsoup()
+        val chapters = fetchChaptersData() // используем кэш или загружаем
+        val chapterData = chapters.find { it.id == chapter.url }
+            ?: return Observable.error(Exception("Глава не найдена: ${chapter.url}"))
 
-            val pages = document.select(".ChapterLinks")
-                .flatMap { season -> season.select("> a") }
-                .map { a ->
-                    // /comic/1185halloween/ -> 1185halloween
-                    val urlPart = a.attr("href").split("/")[2]
-                    val name = a.selectFirst("span")!!.text()
-
-                    TwoKindsPage(urlPart, name)
-                }
-
-            val firstPageIdx = pages.indexOfFirst { it.url == firstPage }
-            val lastPageIdx = min(pages.size, firstPageIdx + 20)
-
-            return Observable.just(
-                pages
-                    .subList(firstPageIdx, lastPageIdx)
-                    .mapIndexed { idx, page ->
-                        Page(idx, baseUrl + "/comic/${page.url}/")
-                    },
-            )
+        val pages = chapterData.pages.mapIndexed { idx, pageRef ->
+            Page(idx, "$baseUrl/comic/${pageRef.urlPart}/")
         }
+        return Observable.just(pages)
     }
 
     override fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException()
 
-//    override fun imageUrlParse(response: Response): String {
-//        val document = response.asJsoup()
-//
-//        return document.select("#comic header img").first()!!.attr("src")
-//    }
     override fun imageUrlParse(response: Response): String {
         val document = response.asJsoup()
         val src = document.select("#comic header img").first()!!.attr("src")
-        return if (src.startsWith("http://") || src.startsWith("https://")) {
-            src
-        } else {
-            "$baseUrl$src"
-        }
+        return if (src.startsWith("http://") || src.startsWith("https://")) src else "$baseUrl$src"
     }
 
+    // ------------------------------------------------------------
+    // Search (не поддерживается)
+    // ------------------------------------------------------------
     override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> = throw Exception("Search functionality is not available.")
 
     override fun searchMangaParse(response: Response): MangasPage = throw UnsupportedOperationException()
-
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = throw UnsupportedOperationException()
+
+    // ------------------------------------------------------------
+    // Вспомогательные методы для работы с архивом
+    // ------------------------------------------------------------
+    private fun fetchChaptersData(response: Response? = null): List<ChapterData> {
+        chaptersCache?.let { return it }
+
+        val resp = response ?: client.newCall(GET("$baseUrl/archive/", headers)).execute()
+        val document = resp.asJsoup()
+
+        val chapters = document.select("section.Chapter").mapNotNull { section ->
+            val id = section.attr("data-ch-id")
+            if (id.isEmpty()) return@mapNotNull null
+
+            val name = section.select("h2").first()?.text() ?: "Без названия"
+            val pages = section.select(".ChapterLinks a").mapNotNull { a ->
+                val href = a.attr("href")
+                // ожидаем формат /comic/число/ или /comic/что-то/
+                val urlPart = href.split("/").getOrNull(2) ?: return@mapNotNull null
+                val pageName = a.select("span").first()?.text() ?: urlPart
+                PageRef(urlPart, pageName)
+            }
+            ChapterData(id, name, pages)
+        }
+
+        chaptersCache = chapters
+        return chapters
+    }
 }
